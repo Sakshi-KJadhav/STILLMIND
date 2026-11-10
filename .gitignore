@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+stillmind_secure.db
+secret.key
