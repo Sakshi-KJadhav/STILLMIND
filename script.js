@@ -35,6 +35,13 @@ themeToggleBtn.addEventListener("click", () => {
 // ================= 4. STRESS SLIDER UPDATE =================
 const stressSlider = document.getElementById("stress-slider");
 const stressValue = document.getElementById("stress-value");
+
+function updateStressDisplay(value) {
+  const nextValue = Math.min(10, Math.max(1, Number(value) || 5));
+  stressSlider.value = String(nextValue);
+  stressValue.textContent = String(nextValue);
+}
+
 stressSlider.addEventListener("input", () => {
   stressValue.textContent = stressSlider.value;
 });
@@ -83,6 +90,10 @@ async function sendMessage() {
 
     const data = await response.json();
     loadingMsg.textContent = data.reply;
+
+    if (typeof data.stress_level !== "undefined") {
+      updateStressDisplay(data.stress_level);
+    }
 
     // If backend detects severe depression or crisis, show the Emergency & Real Psychologist Banner
     if (data.is_emergency) {

@@ -98,6 +98,72 @@ CRISIS_KEYWORDS = [
     "आत्महत्येचा", "जगायचे नाही", "नकोसं वाटतंय", "माझा अंत", "जीव द्यावासा"
 ]
 
+
+def estimate_stress_level(user_message, recent_history=None, mood="General"):
+    history = recent_history or []
+    full_text = " ".join([str(user_message or "")] + [str(item) for item in history]).lower()
+    if not full_text.strip():
+        return 5
+
+    negative_terms = {
+        "panic": 3, "anxious": 3, "anxiety": 3, "overwhelmed": 3, "hopeless": 4,
+        "depressed": 4, "crying": 4, "cry": 3, "exhausted": 3, "tired": 2,
+        "lonely": 3, "sad": 2, "scared": 2, "worried": 2, "stress": 2,
+        "stressed": 2, "nervous": 2, "can't sleep": 4, "cannot sleep": 4,
+        "insomnia": 3, "can't focus": 2, "no reason": 4, "want to die": 8,
+        "kill myself": 9, "self harm": 9, "suicide": 9, "breakdown": 5,
+        "pressure": 2, "failed": 2, "failing": 2, "overthinking": 3,
+        "relationship": 1, "family": 1, "exam": 2, "college": 2, "work": 2,
+        "angry": 1, "upset": 2, "hurt": 1, "frustrated": 2, "ashamed": 2,
+        "alone": 2, "empty": 2, "hoping": 1
+    }
+
+    negative_terms_multilingual = {
+        "ताण": 2, "दुःख": 3, "घाबर": 3, "वाटतंय": 2, "एकटं": 2, "रडू": 4,
+        "अकेला": 2, "परेशान": 3, "तनाव": 2, "डर": 2, "असह्य": 3, "दुख": 3,
+        "नींद": 2, "बहुत": 1, "पढ़ाई": 2, "काम": 2, "जिंदगी": 2, "मरना": 6,
+        "आत्महत्या": 9, "जीना नहीं": 7, "नकोसं": 3, "अवघड": 2
+    }
+
+    positive_terms = {
+        "calm": -2, "happy": -2, "peaceful": -2, "confident": -2, "relaxed": -3,
+        "hopeful": -2, "better": -2, "smile": -2, "rested": -2, "okay": -1,
+        "normal": -1, "strong": -2, "joy": -2, "support": -1
+    }
+
+    positive_terms_multilingual = {
+        "सुसंवादी": -2, "नम्र": -1, "मानसिक": -1, "सुखी": -2, "आनंद": -2,
+        "शांत": -2, "खुशी": -2, "सामर्थ्य": -2, "काळजी": -1, "सोडून": -1,
+        "शांतमय": -2, "सामान्य": -1, "आराम": -2, "ताज": -1
+    }
+
+    score = 5
+
+    for term, weight in negative_terms.items():
+        if term in full_text:
+            score += weight
+    for term, weight in negative_terms_multilingual.items():
+        if term in full_text:
+            score += weight
+    for term, weight in positive_terms.items():
+        if term in full_text:
+            score += weight
+    for term, weight in positive_terms_multilingual.items():
+        if term in full_text:
+            score += weight
+
+    mood_lower = (mood or "").lower()
+    if any(word in mood_lower for word in ["stressed", "overwhelmed", "low", "sad", "anxious", "lost", "tired"]):
+        score += 1
+    if any(word in mood_lower for word in ["smile", "joke", "boost", "happy", "calm", "relaxed"]):
+        score -= 1
+
+    if "i am fine" in full_text or "i feel okay" in full_text:
+        score -= 1
+
+    return max(1, min(10, int(score)))
+
+
 def check_is_emergency(text, stress_level):
     lower_text = text.lower()
     for word in CRISIS_KEYWORDS:
@@ -249,16 +315,20 @@ def chat():
     user_message = data.get("message", "")
     dropdown_language = data.get("language", "English")
     mood = data.get("mood", "General")
-    stress_level = data.get("stress_level", 5)
+    input_stress = int(data.get("stress_level", 5) or 5)
+
+    if session_id not in session_memory:
+        session_memory[session_id] = []
+    session_memory[session_id].append(f"User ({nickname}): {user_message}")
+    recent_history = session_memory[session_id][-8:]
+    detected_stress = estimate_stress_level(user_message, recent_history[:-1], mood)
+    stress_level = max(1, min(10, max(detected_stress, input_stress)))
 
     # Automatically detect if the user typed in Marathi, Hindi, or English!
     active_language = detect_language(user_message, dropdown_language)
     is_emergency = check_is_emergency(user_message, stress_level)
 
-    if session_id not in session_memory:
-        session_memory[session_id] = []
-    session_memory[session_id].append(f"User ({nickname}): {user_message}")
-    recent_history = "\n".join(session_memory[session_id][-8:])
+    recent_history_text = "\n".join(recent_history)
 
     bot_reply = ""
 
@@ -278,7 +348,7 @@ def chat():
             4. If severe distress is detected, guide them to click the Live Video Consultation button to speak with our Clinical or Counseling Psychologists immediately.
 
             Recent Conversation:
-            {recent_history}
+            {recent_history_text}
             """
             client = genai.Client(api_key=GEMINI_API_KEY.strip())
             response = client.models.generate_content(
@@ -322,7 +392,8 @@ def chat():
     return jsonify({
         "reply": bot_reply,
         "is_emergency": is_emergency,
-        "detected_language": active_language
+        "detected_language": active_language,
+        "stress_level": stress_level
     })
 
 if __name__ == "__main__":
