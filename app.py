@@ -3,7 +3,14 @@ import re
 import sqlite3
 
 from datetime import datetime
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, session
+
+from werkzeug.security import (
+    generate_password_hash,
+    check_password_hash
+)
+
+from functools import wraps
 from flask_cors import CORS
 from cryptography.fernet import Fernet
 
@@ -14,6 +21,22 @@ except ImportError:
     GEMINI_AVAILABLE = False
 
 app = Flask(__name__, static_folder=".", static_url_path="")
+DB_FILE = "stillmind.db"
+session_memory = {}
+# Secure login session
+app.secret_key = os.environ.get(
+    "FLASK_SECRET_KEY",
+    "stillmind-local-development-secret-key-2026"
+)
+
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get(
+        "COOKIE_SECURE", "0"
+    ) == "1",
+    PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 7
+)
 CORS(app)
 
 # ================= 1. OPTIONAL GEMINI API KEY =================
@@ -48,11 +71,150 @@ def init_db():
             timestamp TEXT
         )
     """)
+    # Create users table for Login and Signup
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            email TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT
+        )
+    """)
+    columns = [
+        row[1] for row in cursor.execute(
+            "PRAGMA table_info(encrypted_chats)"
+        ).fetchall()
+    ]
+
+    if "user_id" not in columns:
+        cursor.execute("""
+            ALTER TABLE encrypted_chats
+            ADD COLUMN user_id INTEGER
+        """)
     conn.commit()
     conn.close()
 
 init_db()
 session_memory = {}
+# ================= USER AUTHENTICATION =================
+
+session_memory = {}
+
+def login_required(function):
+    @wraps(function)
+    def wrapper(*args, **kwargs):
+        if "user_id" not in session:
+            return jsonify({"error": "Please login first"}), 401
+        return function(*args, **kwargs)
+    return wrapper
+
+
+@app.route("/api/signup", methods=["POST"])
+def signup():
+
+    data = request.get_json(silent=True) or {}
+
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+
+    if not email or "@" not in email:
+        return jsonify({"error": "Enter a valid email"}), 400
+
+    if len(password) < 8:
+        return jsonify({
+            "error": "Password must contain at least 8 characters"
+        }), 400
+
+    password_hash = generate_password_hash(password)
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("""
+            INSERT INTO users (email, password_hash, created_at)
+            VALUES (?, ?, ?)
+        """, (
+            email,
+            password_hash,
+            datetime.now().isoformat()
+        ))
+
+        user_id = cursor.lastrowid
+        conn.commit()
+
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({
+            "error": "This email is already registered. Please login."
+        }), 409
+
+    conn.close()
+
+    session.clear()
+    session.permanent = True
+    session["user_id"] = user_id
+    session["email"] = email
+
+    return jsonify({
+        "message": "Account created successfully",
+        "email": email
+    }), 201
+
+
+@app.route("/api/login", methods=["POST"])
+def login():
+
+    data = request.get_json(silent=True) or {}
+
+    email = data.get("email", "").strip().lower()
+    password = data.get("password", "")
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    user = cursor.execute("""
+        SELECT id, email, password_hash
+        FROM users
+        WHERE email = ?
+    """, (email,)).fetchone()
+
+    conn.close()
+
+    if not user or not check_password_hash(user[2], password):
+        return jsonify({
+            "error": "Invalid email or password"
+        }), 401
+
+    session.clear()
+    session.permanent = True
+    session["user_id"] = user[0]
+    session["email"] = user[1]
+
+    return jsonify({
+        "message": "Login successful",
+        "email": user[1]
+    })
+
+
+@app.route("/api/me", methods=["GET"])
+def current_user():
+    return jsonify({
+        "logged_in": True,
+        "email": "guest@stillmind.local"
+    })
+
+
+@app.route("/api/logout", methods=["POST"])
+@login_required
+def logout():
+
+    session.clear()
+
+    return jsonify({
+        "message": "Logged out successfully"
+    })
 
 # ================= 3. AUTO-DETECT LANGUAGE (MARATHI, HINDI, ENGLISH) =================
 MARATHI_MARKERS = [
@@ -306,10 +468,85 @@ def generate_contextual_reply(user_message, nickname, lang, mood, stress_level, 
 @app.route("/")
 def index():
     return app.send_static_file("index.html")
+# ================= PRIVATE CHAT HISTORY =================
+
+@app.route("/api/conversations", methods=["GET"])
+@login_required
+def get_conversations():
+
+    user_id = session["user_id"]
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    rows = cursor.execute("""
+        SELECT session_id, MIN(timestamp)
+        FROM encrypted_chats
+        WHERE user_id = ?
+        GROUP BY session_id
+        ORDER BY MIN(timestamp) DESC
+    """, (user_id,)).fetchall()
+
+    conversations = []
+
+    for chat_id, timestamp in rows:
+
+        first = cursor.execute("""
+            SELECT encrypted_user_msg
+            FROM encrypted_chats
+            WHERE user_id = ? AND session_id = ?
+            ORDER BY id ASC LIMIT 1
+        """, (user_id, chat_id)).fetchone()
+
+        if first:
+            title = cipher.decrypt(first[0]).decode("utf-8")
+
+            conversations.append({
+                "session_id": chat_id,
+                "title": title[:35],
+                "timestamp": timestamp
+            })
+
+    conn.close()
+
+    return jsonify(conversations)
+
+
+@app.route("/api/history/<session_id>", methods=["GET"])
+@login_required
+def get_chat_history(session_id):
+
+    user_id = session["user_id"]
+
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    rows = cursor.execute("""
+        SELECT encrypted_user_msg, encrypted_bot_reply, timestamp
+        FROM encrypted_chats
+        WHERE user_id = ? AND session_id = ?
+        ORDER BY id ASC
+    """, (user_id, session_id)).fetchall()
+
+    conn.close()
+
+    messages = []
+
+    for user_msg, bot_reply, timestamp in rows:
+
+        messages.append({
+            "user": cipher.decrypt(user_msg).decode("utf-8"),
+            "bot": cipher.decrypt(bot_reply).decode("utf-8"),
+            "timestamp": timestamp
+        })
+
+    return jsonify(messages)
 
 @app.route("/api/chat", methods=["POST"])
+@login_required
 def chat():
     data = request.json
+    user_id = session["user_id"]
     session_id = data.get("session_id", "default")
     nickname = data.get("nickname", "Friend")
     user_message = data.get("message", "")
@@ -317,21 +554,58 @@ def chat():
     mood = data.get("mood", "General")
     input_stress = int(data.get("stress_level", 5) or 5)
 
-    if session_id not in session_memory:
-        session_memory[session_id] = []
-    session_memory[session_id].append(f"User ({nickname}): {user_message}")
-    recent_history = session_memory[session_id][-8:]
-    detected_stress = estimate_stress_level(user_message, recent_history[:-1], mood)
+# Make session memory unique for every account
+    memory_key = f"{user_id}:{session_id}"
+
+    if session_id in ("", "default"):
+        return jsonify({"error": "Invalid conversation ID"}), 400
+
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", session_id):
+        return jsonify({"error": "Invalid conversation ID"}), 400
+
+    if memory_key not in session_memory:
+        session_memory[memory_key] = [] 
+
+    # Restore previous conversation from encrypted database
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    old_messages = cursor.execute("""
+        SELECT encrypted_user_msg, encrypted_bot_reply
+        FROM encrypted_chats
+        WHERE user_id = ? AND session_id = ?
+        ORDER BY id ASC
+    """, (user_id, session_id)).fetchall()
+
+    conn.close()
+
+    for old_user, old_bot in old_messages:
+
+        session_memory[memory_key].append(
+            "User: " + cipher.decrypt(old_user).decode("utf-8")
+        )
+
+        session_memory[memory_key].append(
+            "StillMind: " + cipher.decrypt(old_bot).decode("utf-8")
+        )
+
+    if not user_message.strip():
+        return jsonify({"error": "Message cannot be empty"}), 400
+
+    session_memory[memory_key].append(
+        f"User ({nickname}): {user_message}"
+    )
+
+    recent_history = "\n".join(session_memory[memory_key])
+    detected_stress = estimate_stress_level(user_message, recent_history)
     stress_level = max(1, min(10, max(detected_stress, input_stress)))
 
-    # Automatically detect if the user typed in Marathi, Hindi, or English!
-    active_language = detect_language(user_message, dropdown_language)
-    is_emergency = check_is_emergency(user_message, stress_level)
+    # Automatically detect if the user typed in Marathi, Hindi etc
+    active_language = detect_language(user_message)
+    is_emergency = check_is_emergency(user_message)
 
     recent_history_text = "\n".join(recent_history)
-
     bot_reply = ""
-
     # Use Gemini API if key is configured
     if GEMINI_AVAILABLE and GEMINI_API_KEY and GEMINI_API_KEY.strip():
         try:
@@ -369,15 +643,28 @@ def chat():
         else:
             bot_reply += "\n\n🚨 **Immediate Care Activated:** Because you are experiencing deep emotional pain, please don't carry this alone. Click the **🔴 Join Emergency Video Consultation Now** button above to connect live on video with our Clinical Psychologist, or call Tele-MANAS at `14416` (24/7)."
 
-    session_memory[session_id].append(f"StillMind: {bot_reply}")
+    session_memory[memory_key].append(f"StillMind: {bot_reply}")
 
     # Encrypt and store in SQLite
+    user_id = session["user_id"]
+
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
+
     cursor.execute("""
-        INSERT INTO encrypted_chats (session_id, nickname, mood, stress_level, encrypted_user_msg, encrypted_bot_reply, timestamp)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO encrypted_chats (
+            user_id,
+            session_id,
+            nickname,
+            mood,
+            stress_level,
+            encrypted_user_msg,
+            encrypted_bot_reply,
+            timestamp
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
+        user_id,
         session_id,
         nickname,
         mood,
@@ -386,15 +673,16 @@ def chat():
         cipher.encrypt(bot_reply.encode("utf-8")),
         datetime.now().isoformat()
     ))
+
     conn.commit()
     conn.close()
 
     return jsonify({
-        "reply": bot_reply,
-        "is_emergency": is_emergency,
-        "detected_language": active_language,
-        "stress_level": stress_level
-    })
+            "reply": bot_reply,
+            "is_emergency": is_emergency,
+            "detected_language": active_language,
+            "stress_level": stress_level
+        })
 
 if __name__ == "__main__":
     print("=====================================================")

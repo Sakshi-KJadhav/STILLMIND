@@ -470,3 +470,6 @@ select {
   font-size: 0.9rem;
   color: var(--text-secondary);
 }
+#auth-modal {
+    display: none !important;
+}

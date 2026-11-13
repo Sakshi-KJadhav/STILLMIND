@@ -8,6 +8,67 @@
 </head>
 <body>
 xs
+<!-- ================= LOGIN / SIGNUP SCREEN ================= -->
+
+<div id="auth-modal" class="modal-overlay auth-overlay">
+
+  <div class="modal-box auth-box">
+
+    <h2>🌿 Welcome to StillMind</h2>
+
+    <p id="auth-description">
+      Login to access your private conversations.
+    </p>
+
+    <div class="auth-tabs">
+      <button id="show-login" class="primary-btn">
+        Login
+      </button>
+
+      <button id="show-signup" class="secondary-btn">
+        Sign Up
+      </button>
+    </div>
+
+    <form id="auth-form">
+
+      <label class="input-label">Email Address</label>
+
+      <input
+        type="email"
+        id="auth-email"
+        placeholder="Enter your email"
+        required
+      />
+
+      <label class="input-label">Password</label>
+
+      <input
+        type="password"
+        id="auth-password"
+        placeholder="Minimum 8 characters"
+        minlength="8"
+        required
+      />
+
+      <button
+        type="submit"
+        id="auth-submit"
+        class="primary-btn full-width"
+      >
+        Login
+      </button>
+
+    </form>
+
+    <p id="auth-message" role="status"></p>
+
+    <p class="small-text">
+      🔒 Your account keeps your conversations private.
+    </p>
+
+  </div>
+</div>
   <!-- ================= 1. INFORMED CONSENT POP-UP MODAL ================= -->
   <div id="consent-modal" class="modal-overlay">
     <div class="modal-box">
@@ -95,6 +156,30 @@ xs
 
     <!-- LEFT COLUMN: EMPATHETIC AI CHATBOT -->
     <section class="chat-card">
+      <!-- CHAT HISTORY MENU -->
+
+<button id="history-toggle" class="history-menu-btn">
+  ☰ Chat History
+</button>
+
+<button id="new-chat-btn" class="secondary-btn">
+  + New Chat
+</button>
+
+<aside id="history-sidebar" class="history-sidebar hidden">
+
+  <div class="history-top">
+    <h3>🌿 Previous Chats</h3>
+    <button id="history-close">✕</button>
+  </div>
+
+  <div id="conversation-list"></div>
+
+  <button id="logout-btn" class="secondary-btn full-width">
+    Logout
+  </button>
+
+</aside>
       <div class="chat-header">
         <div>
           <h2>💬 StillMind AI Companion</h2>
