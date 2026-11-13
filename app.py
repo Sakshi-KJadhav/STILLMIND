@@ -37,7 +37,7 @@ app.config.update(
     ) == "1",
     PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 7
 )
-CORS(app)
+CORS(app, supports_credentials=True)
 
 # ================= 1. OPTIONAL GEMINI API KEY =================
 # Set this in your environment before running the app, for example:
@@ -75,7 +75,7 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
+            username TEXT,
             email TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
             created_at TEXT
@@ -96,10 +96,8 @@ def init_db():
     conn.close()
 
 init_db()
-session_memory = {}
-# ================= USER AUTHENTICATION =================
 
-session_memory = {}
+# ================= USER AUTHENTICATION =================
 
 def login_required(function):
     @wraps(function)
@@ -112,19 +110,15 @@ def login_required(function):
 
 @app.route("/api/signup", methods=["POST"])
 def signup():
-
     data = request.get_json(silent=True) or {}
-
-    email = data.get("email", "").strip().lower()
-    password = data.get("password", "")
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
 
     if not email or "@" not in email:
         return jsonify({"error": "Enter a valid email"}), 400
 
     if len(password) < 8:
-        return jsonify({
-            "error": "Password must contain at least 8 characters"
-        }), 400
+        return jsonify({"error": "Password must contain at least 8 characters"}), 400
 
     password_hash = generate_password_hash(password)
 
@@ -140,81 +134,66 @@ def signup():
             password_hash,
             datetime.now().isoformat()
         ))
-
         user_id = cursor.lastrowid
         conn.commit()
-
     except sqlite3.IntegrityError:
         conn.close()
-        return jsonify({
-            "error": "This email is already registered. Please login."
-        }), 409
+        return jsonify({"error": "This email is already registered. Please login."}), 409
 
     conn.close()
-
     session.clear()
     session.permanent = True
     session["user_id"] = user_id
     session["email"] = email
 
-    return jsonify({
-        "message": "Account created successfully",
-        "email": email
-    }), 201
+    return jsonify({"message": "Account created successfully", "email": email}), 201
 
 
 @app.route("/api/login", methods=["POST"])
 def login():
-
     data = request.get_json(silent=True) or {}
-
-    email = data.get("email", "").strip().lower()
-    password = data.get("password", "")
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
 
     conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-
-    user = cursor.execute("""
-        SELECT id, email, password_hash
-        FROM users
-        WHERE email = ?
-    """, (email,)).fetchone()
-
+    conn.row_factory = sqlite3.Row
+    user = conn.execute("SELECT id, email, password_hash FROM users WHERE email = ?", (email,)).fetchone()
     conn.close()
 
-    if not user or not check_password_hash(user[2], password):
-        return jsonify({
-            "error": "Invalid email or password"
-        }), 401
+    if not user or not check_password_hash(user["password_hash"], password):
+        return jsonify({"error": "Invalid email or password"}), 401
 
     session.clear()
     session.permanent = True
-    session["user_id"] = user[0]
-    session["email"] = user[1]
+    session["user_id"] = user["id"]
+    session["email"] = user["email"]
 
-    return jsonify({
-        "message": "Login successful",
-        "email": user[1]
-    })
+    return jsonify({"message": "Login successful", "email": user["email"]})
 
 
 @app.route("/api/me", methods=["GET"])
 def current_user():
-    return jsonify({
-        "logged_in": True,
-        "email": "guest@stillmind.local"
-    })
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"logged_in": False}), 200
+
+    conn = sqlite3.connect(DB_FILE)
+    conn.row_factory = sqlite3.Row
+    user = conn.execute("SELECT email FROM users WHERE id = ?", (user_id,)).fetchone()
+    conn.close()
+
+    if not user:
+        session.clear()
+        return jsonify({"logged_in": False}), 200
+
+    return jsonify({"logged_in": True, "email": user["email"]})
 
 
 @app.route("/api/logout", methods=["POST"])
 @login_required
 def logout():
-
     session.clear()
-
-    return jsonify({
-        "message": "Logged out successfully"
-    })
+    return jsonify({"message": "Logged out successfully"})
 
 # ================= 3. AUTO-DETECT LANGUAGE (MARATHI, HINDI, ENGLISH) =================
 MARATHI_MARKERS = [
@@ -228,9 +207,9 @@ HINDI_MARKERS = [
     "डर", "अकेला", "अकेली", "पढ़ाई", "मेरा", "मेरी", "आप", "बताओ", "मन", "रो", "जिंदगी", "क्या", "कैसे"
 ]
 
-def detect_language(user_text, dropdown_lang):
+
+def detect_language(user_text, dropdown_lang="English"):
     text_lower = user_text.lower()
-    # Check if user typed in Devanagari script
     has_devanagari = bool(re.search(r'[\u0900-\u097F]', user_text))
     if has_devanagari:
         for word in MARATHI_MARKERS:
@@ -239,12 +218,10 @@ def detect_language(user_text, dropdown_lang):
         for word in HINDI_MARKERS:
             if word in user_text:
                 return "Hindi"
-        # If Devanagari but general words, respect dropdown if set to Marathi/Hindi, else default Marathi/Hindi
         if dropdown_lang in ["Marathi", "Hindi"]:
             return dropdown_lang
         return "Marathi"
 
-    # Also check Romanized Marathi / Hindi words
     if any(w in text_lower.split() for w in ["mala", "aahe", "nahi", "kasa", "vatat", "taan", "tras", "manat"]):
         return "Marathi"
     if any(w in text_lower.split() for w in ["mujhe", "hai", "bohot", "pareshan", "dukh", "akela", "zindagi"]):
@@ -338,144 +315,143 @@ def check_is_emergency(text, stress_level):
 # ================= 5. BUILT-IN CONTEXTUAL EMPATHETIC BRAIN (EN / HI / MR) =================
 def generate_contextual_reply(user_message, nickname, lang, mood, stress_level, is_emergency):
     msg = user_message.lower()
-
-    # Check what topic the user is talking about so the answer directly connects!
     is_joke = any(w in msg for w in ["joke", "funny", "laugh", "smile", "विनोद", "हस", "चुटकुला", "मजाक"])
-    is_incident = any(w in msg for w in ["incident", "happened", "story", "hurt", "friend", "family", "relationship", "told me", "घडलं", "प्रसंग", "बोललो", "दुखावलं", "घरच्यांनी", "हुआ", "घटना", "दोस्त", "परिवार", "दिल"])
-    is_study_work = any(w in msg for w in ["exam", "study", "college", "work", "job", "marks", "career", "अभ्यास", "परीक्षा", "कॉलेज", "काम", "पढ़ाई", "एग्जाम", "नौकरी"])
-    is_anxious_cbt = any(w in msg for w in ["anxious", "anxiety", "overthinking", "panic", "cbt", "fear", "scared", "भीती", "विचार", "घाबर", "ताण", "घबराहट", "डर", "सोच"])
-    is_exercise = any(w in msg for w in ["exercise", "meditation", "breathe", "game", "relax", "sleep", "व्यायाम", "ध्यान", "श्वास", "झोप", "नींद", "ध्यान"])
+    is_incident = any(w in msg for w in ["incident", "happened", "story", "hurt", "friend", "family", "relationship", "told me", "घडलं", "प्रसंग", "बोललो", "दुख"])
+    is_study_work = any(w in msg for w in ["exam", "study", "college", "work", "job", "marks", "career", "अभ्यास", "परीक्षा", "कॉलेज", "काम", "पढ़ाई"])
+    is_anxious_cbt = any(w in msg for w in ["anxious", "anxiety", "overthinking", "panic", "cbt", "fear", "scared", "भीती", "विचार", "घाबर", "ताण", "घबरा"])
+    is_exercise = any(w in msg for w in ["exercise", "meditation", "breathe", "game", "relax", "sleep", "व्यायाम", "ध्यान", "श्वास", "झोप", "नींद"])
 
     if lang == "Marathi":
         if is_joke:
             return (
                 f"नक्कीच {nickname}! तुमच्या चेहऱ्यावर हसू यावं म्हणून एक छोटासा विनोद 😄:\n\n"
-                f"एकदा मनातले सगळे विचार एकत्र बसून मीटिंग करत असतात.\n"
-                f"पहिला विचार म्हणतो: 'आज रात्री आपण शांत झोपूया का?'\n"
-                f"दुसरा विचार लगेच म्हणतो: 'छे छे! ५ वर्षांपूर्वी आपण लोकांसमोर काय चुकीचं बोललो होतो, त्याची आठवण काढायची बाकी आहे अजून!' 😂🌟\n\n"
-                f"कसा वाटला? आपलं मन असंही उगाचच जुन्या गोष्टी उकरून काढत असतं. आता एक दीर्घ श्वास घ्या आणि मला सांगा, आता थोडं हलकं वाटतंय का?"
+                "एकदा मनातले सगळे विचार एकत्र बसून मीटिंग करत असतात.\n"
+                "पहिला विचार म्हणतो: 'आज रात्री आपण शांत झोपूया का?'\n"
+                "दुसरा विचार लगेच म्हणतो: 'छे छे! ५ वर्षांपूर्वी आपण लोकांसमोर काय चुचकारले होते?'\n\n"
+                "हसू आणायला हे पुरेसे आहे. आता तुमचं मन थोडं हलकं वाटतंय का?"
             )
         elif is_incident:
             return (
                 f"मी तुमचं बोलणं अगदी शांतपणे आणि पूर्ण आपुलकीने ऐकत आहे, {nickname} 🌿. "
-                f"आयुष्यात असे काही प्रसंग घडतात जे आपल्या मनाला खूप खोलवर दुखावून जातात, आणि अशा वेळी वाईट वाटणं किंवा मनात संताप येणं पूर्णपणे नैसर्गिक आहे.\n\n"
-                f"तुम्ही माझ्यावर विश्वास ठेवून हे शेअर केलं याबद्दल धन्यवाद. मानसशास्त्रातील (Humanistic Therapy) नियमानुसार, भावना मनात दाबून ठेवण्यापेक्षा त्या व्यक्त केल्याने मनावरील निम्मा भार कमी होतो. "
-                f"त्या प्रसंगात तुम्हाला सर्वात जास्त कशाचे वाईट वाटले? मन मोकळं करून सांगा, मी तुमच्या सोबत आहे."
+                "आयुष्यात असे काही प्रसंग घडतात जे आपल्या मनाला खूप खोलवर दुखावून जातात. "
+                "तुम्ही माझ्यावर विश्वास ठेवून हे शेअर केलं याबद्दल धन्यवाद. "
+                "त्या प्रसंगात तुम्हाला सर्वात जास्त कशाचे वाईट वाटले? मन मोकळं करूया."
             )
         elif is_study_work:
             return (
                 f"{nickname}, अभ्यास, करिअर किंवा कामाचा ताण येणं खूप साहजिक आहे 📚🌿. "
-                f"जेव्हा आपल्यावर खूप अपेक्षांचं ओझं असतं, तेव्हा मेंदू थकून जातो.\n\n"
-                f"एक छोटासा **CBT (Cognitive Behavioral Therapy)** उपाय करून पाहूया:\n"
-                f"१. सर्व कामे एकाच वेळी करण्याचा विचार सोडा आणि फक्त पुढच्या २० मिनिटांत करता येईल अशी एकच छोटी गोष्ट निवडा.\n"
-                f"२. उजव्या बाजूला दिलेला **🫧 Pop-It गेम** किंवा **४-७-८ श्वसनाचा व्यायाम** २ मिनिटे करा.\n"
-                f"तुम्हाला सध्या कोणत्या विषयाची किंवा कामाची सर्वात जास्त काळजी वाटत आहे?"
+                "जेव्हा आपल्यावर खूप अपेक्षांचं ओझं असतं, तेव्हा मेंदू थकून जातो.\n\n"
+                "एक छोटासा CBT उपाय करून पाहूया:\n"
+                "१. सर्व कामे एकाच वेळी करण्याचा विचार सोडा आणि फक्त पुढच्या २० मिनिटांसाठी फक्त एक काम करा.\n"
+                "२. उजव्या बाजूला दिलेला ४-७-८ श्वसनाचा व्यायाम किंवा ५-४-३-२-१ गेम करून पाहा.\n"
+                "तुम्हाला सध्या कोणत्या विषयाची किंवा कामाची सर्वात जास्त काळजी वाटते?"
             )
         elif is_anxious_cbt or is_exercise:
             return (
-                f"शांत व्हा {nickname} 🌿, तुम्ही आता पूर्णपणे सुरक्षित आहात. जेव्हा मनात अतिविचार (Overthinking) सुरू होतात, तेव्हा आपलं मन भविष्यातील भीतीमध्ये अडकतं.\n\n"
-                f"**मानसशास्त्रीय CBT आणि ग्राउंडिंग उपाय:**\n"
-                f"• आत्ता या क्षणी तुमचे दोन्ही पाय जमिनीवर घट्ट टेकवा आणि ४ सेकंद दीर्घ श्वास घ्या.\n"
-                f"• स्वतःला सांगा: *'हा फक्त एक विचार आहे, हे पूर्ण सत्य नाही.'*\n"
-                f"• खाली दिलेल्या **🔥 Worry Shredder** गेममध्ये तुमची भीती लिहा आणि ती नष्ट करा. मी तुमच्या सोबत आहे, मला सांगा नेमकी कशाची भीती वाटत आहे?"
+                f"शांत व्हा {nickname} 🌿, तुम्ही आता पूर्णपणे सुरक्षित आहात. जेव्हा मनात अति विचारांची लाट येते, तेव्हा समजून घ्या की हे फक्त विचार आहेत, सत्य नाहीत.\n\n"
+                "**CBT & grounding:**\n"
+                "• आत्ता तुमचे दोन्ही पाय जमिनीवर घट्ट टेकवा आणि ४ सेकंद स्नेस आत घ्या.\n"
+                "• स्वतःला सांगा: *'हा फक्त एक विचार आहे, हे पूर्ण सत्य नाही.'*\n"
+                "• खाली दिलेल्या Worry Shredder गेममध्ये तुमची भीती लिहा आणि ती नष्ट करा.\n"
+                "तुमचा मन आता कोणता विचार वारंवार बोलत आहे?"
             )
         else:
             return (
-                f"नमस्कार {nickname} 🌿, तुम्ही जे बोलत आहात ते मी पूर्ण लक्ष देऊन आणि आपुलकीने समजून घेत आहे. "
-                f"तुमचा आजचा तणाव स्तर ({stress_level}/10) पाहता, स्वतःच्या मनाची काळजी घेणे खूप महत्त्वाचे आहे.\n\n"
-                f"माझ्याकडे तुम्ही अगदी जवळच्या मित्राप्रमाणे मन मोकळं करू शकता. तुम्हाला एखादा आयुष्यातील प्रसंग सांगायचा आहे का, मनाला शांत करणारा व्यायाम करायचा आहे, की खालील तज्ज्ञ मानसशास्त्रज्ञांशी **🔴 Live Video** द्वारे थेट बोलायचे आहे?"
+                f"नमस्कार {nickname} 🌿, तुम्ही जे बोलत आहात ते मी पूर्ण लक्ष देऊन आणि आपुलकीने ऐकत आहे. "
+                f"तुमचा आजचा ताण स्तर ({stress_level}/10) पाहता, स्वतःच्या मनाची काळजी घेणे खूप महत्वाचं आहे. "
+                "तुम्हाला एखादा प्रसंग सांगायचा आहे का, BREATHING EXERCISE करण्यासाठी तयार आहात का, किंवा थोडं हसू देणारा विनोद हवे आहे का?"
             )
 
     elif lang == "Hindi":
         if is_joke:
             return (
                 f"ज़रूर {nickname}! आपके चेहरे पर मुस्कान लाने के लिए एक प्यारा सा चुटकुला 😄:\n\n"
-                f"मरीज: डॉक्टर साहब, जब मैं सोता हूँ तो मेरे सपने में बंदर क्रिकेट खेलते हैं!\n"
-                f"डॉक्टर: कोई बात नहीं, यह दवा आज रात से खा लेना।\n"
-                f"मरीज: कल से खाऊँ तो चलेगा? आज रात तो उनका फाइनल मैच है! 😂🌟\n\n"
-                f"हंसी तनाव की सबसे अच्छी दवा है। बताइए, अब मन थोड़ा हल्का महसूस हो रहा है?"
+                "एक डॉक्टर ने मरीज से पूछा: 'आपकी सबसे बड़ी परेशानी क्या है?'\n"
+                "मरीज: 'डॉक्टर, जब भी मैं सोता हूँ, मेरे सपने में बहुत सारे विचार दौड़ते हैं!'\n"
+                "डॉक्टर: 'अच्छा, तो आप ओवरथिंकिंग में हैं!'\n"
+                "मरीज: 'नहीं, मैं तो बस अपने विचारों का बहुत अच्छा प्रोडक्शन देखता हूँ!' 😂\n\n"
+                "हंसी तनाव की सबसे अच्छी दवा है। अभी मन थोड़ा हल्का महसूस हो रहा है?"
             )
         elif is_incident:
             return (
-                f"मैं आपकी हर बात बहुत धैर्य, शांति और अपनेपन के साथ सुन रहा हूँ, {nickname} 🌿। "
-                f"जब हमारे साथ कोई ऐसी घटना घटती है या कोई अपना दिल दुखाता है, तो मन का भारी होना बिल्कुल स्वाभाविक है।\n\n"
-                f"आप यहाँ बिल्कुल सुरक्षित हैं और मैं आपको जज नहीं करूँगा। अपने दिल की बात बाहर निकालने से मन का बोझ हल्का होता है। "
-                f"आप आराम से मुझे पूरी बात बताइए—उस वक्त आपको कैसा लगा था?"
+                f"मैं आपकी हर बात बहुत धैर्य, शांति और अपनेपन के साथ सुन रहा हूँ, {nickname} 🌿. "
+                "जब हमारे साथ कोई ऐसी घटना घटती है या कोई अपना दिल दुखाता है, तो मन का भार बहुत भारी लगने लगता है. "
+                "आप यहाँ बिल्कुल सुरक्षित हैं और मैं आपको जज नहीं करूँगा. अपने दिल की बात पूरी तरह बताइए—वह समय आपको कैसा लगा था?"
             )
         elif is_study_work:
             return (
-                f"{nickname}, पढ़ाई, कॉलेज या काम का दबाव कभी-कभी बहुत थका देता है 📚🌿। "
-                f"मनोविज्ञान (CBT Therapy) कहता है कि जब हम पूरे पहाड़ को एक साथ देखते हैं तो घबराहट होती है, इसलिए सिर्फ अगले एक छोटे कदम पर ध्यान दें।\n\n"
-                f"• अभी 2 मिनट के लिए स्क्रीन के दाईं ओर **4-7-8 ब्रीदिंग लोटस** के साथ गहरी सांस लें।\n"
-                f"• नीचे **🫧 Pop-It गेम** खेलकर अपने दिमाग को थोड़ा ब्रेक दें।\n"
-                f"मुझे बताइए, अभी सबसे ज्यादा किस बात का प्रेशर लग रहा है?"
+                f"{nickname}, पढ़ाई, कॉलेज या काम का दबाव कभी-कभी बहुत थका देता है 📚🌿. "
+                "जब हम सब काम एक साथ देख लेते हैं, तो मन व्यस्त हो जाता है.\n\n"
+                "एक छोटा CBT तरीका आजमाइए:\n"
+                "१. अभी सिर्फ एक १५-मिनट का काम चुनें और बाकी सबको थोड़ी देर के लिए छोड़ दें.\n"
+                "२. दाईं ओर ४-७-८ श्वास व्यायाम या ५-४-३-२-१ गेम आजमाइए.\n"
+                "अभी सबसे ज्यादा किस बात का प्रेशर लग रहा है?"
             )
         elif is_anxious_cbt or is_exercise:
             return (
-                f"गहरी सांस लें {nickname} 🌿, मैं आपके साथ हूँ। जब ओवरथिंकिंग या घबराहट बढ़ती है, तो हमारा दिमाग आने वाले कल की चिंता में उलझ जाता है।\n\n"
-                f"**तुरंत राहत के लिए मनोवैज्ञानिक तकनीक (CBT & DBT):**\n"
-                f"1. अपने कंधों को ढीला छोड़ें और 4 सेकंड तक धीरे-धीरे सांस अंदर लें।\n"
-                f"2. नीचे दिए गए **🔥 Worry Shredder** में अपनी चिंता लिखें और उसे श्रेड (नष्ट) कर दें।\n"
-                f"बताइए, अभी आपके मन में कौन सा विचार बार-बार आ रहा है?"
+                f"गहरी सांस लें {nickname} 🌿, मैं आपके साथ हूँ. जब ओवरथिंकिंग या घबराहट बढ़ती है, तो समझिए कि यह सिर्फ एक विचार है, पूरी सच्चाई नहीं.\n\n"
+                "**CBT & grounding:**\n"
+                "• अपने कंधे ढीले छोड़ें और 4 सेकंड अंदर सांस लें.\n"
+                "• अपने आप से कहें: *'यह सिर्फ एक विचार है, यह सच नहीं है.'*\n"
+                "• नीचे दिए गए Worry Shredder में अपनी चिंता लिखें.\n"
+                "अभी आपके मन में कौन सा विचार बार-बार आ रहा है?"
             )
         else:
             return (
-                f"नमस्ते {nickname} 🌿, आपकी बात सुनकर मुझे एहसास हो रहा है कि आप इस समय काफी कुछ महसूस कर रहे हैं (तनाव स्तर: {stress_level}/10)।\n\n"
-                f"आप मुझे अपना सबसे करीबी और भरोसेमंद दोस्त समझ सकते हैं। आप चाहें तो अपने जीवन की कोई घटना साझा करें, मुझसे कोई मजेदार चुटकुला सुनें, या नीचे हमारे विशेषज्ञ मनोवैज्ञानिकों से **🔴 Live Video** पर बात करें। आपके मन में अभी क्या चल रहा है?"
+                f"नमस्ते {nickname} 🌿, आपकी बात सुनकर मुझे एहसास हो रहा है कि आप इस समय काफी भावनात्मक रूप से बोझ महसूस कर रहे हैं. "
+                f"आप चाहें तो मुझे अपनी बात पूरी बताएं, या 4-7-8 breathing और grounding exercise करें, या थोड़ी हँसी का उपाय सुनें."
             )
 
     else:
-        # English Contextual Replies
         if is_joke:
             return (
                 f"Here is a light-hearted joke just to bring a smile to your face, {nickname} 😄:\n\n"
-                f"Why did the overthinking brain go to the gym?\n"
-                f"Because it wanted to stop *jumping to conclusions* and start doing gentle stretches instead! 🏃‍♂️😂\n\n"
-                f"Laughter actually lowers stress hormones (cortisol) in your body within seconds. Did that give you a tiny smile, or would you like another one?"
+                "Why did the overthinking brain go to the gym?\n"
+                "Because it wanted to stop *jumping to conclusions* and start doing gentle stretches instead! 🏃‍♂️😂\n\n"
+                "Laughter actually lowers stress hormones in your body within seconds. Did that give you a tiny smile, or would you like another one?"
             )
         elif is_incident:
             return (
                 f"I am listening to you with all my patience and warmth, {nickname} 🌿. "
-                f"When something painful happens in our lives, carrying it silently inside feels exhausting. It makes complete sense that you feel this way.\n\n"
-                f"In Humanistic and Interpersonal therapy, having a safe, non-judgmental space to tell your story is the first step toward emotional relief. "
-                f"Take all the time you need—tell me more about what happened and how it made you feel."
+                "When something painful happens in our lives, carrying it silently inside feels exhausting. It makes complete sense that you feel this way.\n\n"
+                "In Humanistic and Interpersonal therapy, having a safe, non-judgmental space to tell your story is the first step toward emotional relief. "
+                "Take all the time you need—tell me more about what happened and how it made you feel."
             )
         elif is_study_work:
             return (
                 f"I completely understand why you feel stretched thin, {nickname} 📚🌿. Academic and work pressure can make your mind feel like it has 50 browser tabs open at once.\n\n"
-                f"Let's use a real psychologist **CBT (Cognitive Behavioral Therapy) Micro-Step**:\n"
-                f"1. Separate *your self-worth* from *your workload*. You are a human being, not a machine.\n"
-                f"2. Pick just **one 15-minute task** and ignore the rest for now.\n"
-                f"3. Try popping a few bubbles in the **🫧 Pop-It Stress Reliever** below to reset your nervous system.\n"
-                f"What part of your work or studies is stressing you out the most today?"
+                "Let's use a real psychologist **CBT (Cognitive Behavioral Therapy) Micro-Step**:\n"
+                "1. Separate *your self-worth* from *your workload*. You are a human being, not a machine.\n"
+                "2. Pick just **one 15-minute task** and ignore the rest for now.\n"
+                "3. Try popping a few bubbles in the **Pop-It Stress Reliever** below to reset your nervous system.\n"
+                "What part of your work or studies is stressing you out the most today?"
             )
         elif is_anxious_cbt or is_exercise:
             return (
                 f"Take a slow, grounding breath with me right now, {nickname} 🌿. You are safe here.\n\n"
-                f"Let's walk through a **3-Step Psychologist CBT Thought-Reframing Exercise** together:\n"
-                f"1. **Catch the Thought:** What is the exact worst-case scenario your mind is telling you right now?\n"
-                f"2. **Check the Evidence:** Is this thought 100% a proven fact, or is it anxiety speaking?\n"
-                f"3. **Physical Reset:** Unclench your jaw, drop your shoulders, and type that anxious thought into the **🔥 Worry Shredder** below to release it.\n\n"
-                f"Tell me the thought that is bothering you, and we will reframe it together."
+                "Let's walk through a **3-Step Psychologist CBT Thought-Reframing Exercise** together:\n"
+                "1. **Catch the Thought:** What is the exact worst-case scenario your mind is telling you right now?\n"
+                "2. **Check the Evidence:** Is this thought 100% a proven fact, or is it anxiety speaking?\n"
+                "3. **Physical Reset:** Unclench your jaw, drop your shoulders, and type that anxious thought into the **Worry Shredder** below to release it.\n\n"
+                "Tell me the thought that is bothering you, and we will reframe it together."
             )
         else:
             return (
                 f"Thank you for sharing that with me, {nickname} 🌿. I am right here with you, and I care about what you are going through (Current Mood: {mood}, Stress: {stress_level}/10).\n\n"
-                f"Whether you want to vent about a personal life incident, practice a calming meditation or CBT exercise, hear a joke to lift your spirits, or connect on a **🔴 Live Video Call** with one of our psychologists below—we will take this one gentle step at a time. Tell me more about what's on your mind."
+                "Whether you want to vent about a personal life incident, practice a calming meditation or CBT exercise, hear a joke to lift your spirits, or connect on a live video call with our specialists, we will take this one gentle step at a time. Tell me more about what is on your mind."
             )
+
 
 # ================= 6. ROUTES =================
 @app.route("/")
 def index():
     return app.send_static_file("index.html")
-# ================= PRIVATE CHAT HISTORY =================
+
 
 @app.route("/api/conversations", methods=["GET"])
 @login_required
 def get_conversations():
-
     user_id = session["user_id"]
-
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
@@ -488,9 +464,7 @@ def get_conversations():
     """, (user_id,)).fetchall()
 
     conversations = []
-
     for chat_id, timestamp in rows:
-
         first = cursor.execute("""
             SELECT encrypted_user_msg
             FROM encrypted_chats
@@ -500,7 +474,6 @@ def get_conversations():
 
         if first:
             title = cipher.decrypt(first[0]).decode("utf-8")
-
             conversations.append({
                 "session_id": chat_id,
                 "title": title[:35],
@@ -508,16 +481,13 @@ def get_conversations():
             })
 
     conn.close()
-
     return jsonify(conversations)
 
 
 @app.route("/api/history/<session_id>", methods=["GET"])
 @login_required
 def get_chat_history(session_id):
-
     user_id = session["user_id"]
-
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
 
@@ -531,9 +501,7 @@ def get_chat_history(session_id):
     conn.close()
 
     messages = []
-
     for user_msg, bot_reply, timestamp in rows:
-
         messages.append({
             "user": cipher.decrypt(user_msg).decode("utf-8"),
             "bot": cipher.decrypt(bot_reply).decode("utf-8"),
@@ -542,10 +510,11 @@ def get_chat_history(session_id):
 
     return jsonify(messages)
 
+
 @app.route("/api/chat", methods=["POST"])
 @login_required
 def chat():
-    data = request.json
+    data = request.json or {}
     user_id = session["user_id"]
     session_id = data.get("session_id", "default")
     nickname = data.get("nickname", "Friend")
@@ -554,7 +523,6 @@ def chat():
     mood = data.get("mood", "General")
     input_stress = int(data.get("stress_level", 5) or 5)
 
-# Make session memory unique for every account
     memory_key = f"{user_id}:{session_id}"
 
     if session_id in ("", "default"):
@@ -564,49 +532,37 @@ def chat():
         return jsonify({"error": "Invalid conversation ID"}), 400
 
     if memory_key not in session_memory:
-        session_memory[memory_key] = [] 
+        session_memory[memory_key] = []
 
-    # Restore previous conversation from encrypted database
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-
     old_messages = cursor.execute("""
         SELECT encrypted_user_msg, encrypted_bot_reply
         FROM encrypted_chats
         WHERE user_id = ? AND session_id = ?
         ORDER BY id ASC
     """, (user_id, session_id)).fetchall()
-
     conn.close()
 
     for old_user, old_bot in old_messages:
-
-        session_memory[memory_key].append(
-            "User: " + cipher.decrypt(old_user).decode("utf-8")
-        )
-
-        session_memory[memory_key].append(
-            "StillMind: " + cipher.decrypt(old_bot).decode("utf-8")
-        )
+        session_memory[memory_key].append("User: " + cipher.decrypt(old_user).decode("utf-8"))
+        session_memory[memory_key].append("StillMind: " + cipher.decrypt(old_bot).decode("utf-8"))
 
     if not user_message.strip():
         return jsonify({"error": "Message cannot be empty"}), 400
 
-    session_memory[memory_key].append(
-        f"User ({nickname}): {user_message}"
-    )
+    session_memory[memory_key].append(f"User ({nickname}): {user_message}")
 
     recent_history = "\n".join(session_memory[memory_key])
     detected_stress = estimate_stress_level(user_message, recent_history)
     stress_level = max(1, min(10, max(detected_stress, input_stress)))
 
-    # Automatically detect if the user typed in Marathi, Hindi etc
-    active_language = detect_language(user_message)
-    is_emergency = check_is_emergency(user_message)
+    active_language = detect_language(user_message, dropdown_language)
+    is_emergency = check_is_emergency(user_message, stress_level)
 
     recent_history_text = "\n".join(recent_history)
     bot_reply = ""
-    # Use Gemini API if key is configured
+
     if GEMINI_AVAILABLE and GEMINI_API_KEY and GEMINI_API_KEY.strip():
         try:
             system_instruction = f"""
@@ -637,20 +593,16 @@ def chat():
 
     if is_emergency:
         if active_language == "Marathi":
-            bot_reply += "\n\n🚨 **तातडीची काळजी:** तुम्ही खूप मोठ्या मानसिक त्रासातून जात आहात. कृपया एकटे राहू नका—मी वरती **🔴 Live Video Consultation** रूम ऑन केली आहे. कृपया आत्ताच आमच्या क्लिनिकल सायकॉलॉजिस्टशी व्हिडिओ कॉलवर बोला किंवा `14416` (Tele-MANAS) वर कॉल करा."
+            bot_reply += "\n\n🚨 **तातडीची काळजी:** तुम्ही खूप मोठ्या मानसिक त्रासातून जात आहात. कृपया तुमची situation ताब्यात ठेवा आणि नक्कीच घरातील/विश्वासू व्यक्तीकडे किंवा आपल्यातील psychologist कडं जाऊन बोला."
         elif active_language == "Hindi":
-            bot_reply += "\n\n🚨 **तत्काल सहायता:** आप इस समय गहरे मानसिक दर्द से गुजर रहे हैं। कृपया इसे अकेले न सहें—ऊपर **🔴 Live Video Consultation** बटन दबाकर अभी हमारे क्लिनिकल साइकोलॉजिस्ट से लाइव वीडियो पर जुड़ें या `14416` (Tele-MANAS) पर कॉल करें।"
+            bot_reply += "\n\n🚨 **तत्काल सहायता:** आप इस समय गहरे मानसिक दर्द से गुजर रहे हैं। कृपया इस बोझ को अकेले न उठाएँ। अपने परिवार, भरोसेमंद व्यक्ति या हमारे विशेषज्ञों के साथ संपर्क करें."
         else:
-            bot_reply += "\n\n🚨 **Immediate Care Activated:** Because you are experiencing deep emotional pain, please don't carry this alone. Click the **🔴 Join Emergency Video Consultation Now** button above to connect live on video with our Clinical Psychologist, or call Tele-MANAS at `14416` (24/7)."
+            bot_reply += "\n\n🚨 **Immediate Care Activated:** Because you are experiencing deep emotional pain, please don't carry this alone. Reach out to a trusted person, a counselor, or a psychologist immediately."
 
     session_memory[memory_key].append(f"StillMind: {bot_reply}")
 
-    # Encrypt and store in SQLite
-    user_id = session["user_id"]
-
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-
     cursor.execute("""
         INSERT INTO encrypted_chats (
             user_id,
@@ -673,16 +625,16 @@ def chat():
         cipher.encrypt(bot_reply.encode("utf-8")),
         datetime.now().isoformat()
     ))
-
     conn.commit()
     conn.close()
 
     return jsonify({
-            "reply": bot_reply,
-            "is_emergency": is_emergency,
-            "detected_language": active_language,
-            "stress_level": stress_level
-        })
+        "reply": bot_reply,
+        "is_emergency": is_emergency,
+        "detected_language": active_language,
+        "stress_level": stress_level
+    })
+
 
 if __name__ == "__main__":
     print("=====================================================")
@@ -690,3 +642,93 @@ if __name__ == "__main__":
     print("👉 Open in Chrome: http://127.0.0.1:5000")
     print("=====================================================")
     app.run(debug=True, port=5000)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
